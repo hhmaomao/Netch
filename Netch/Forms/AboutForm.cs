@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Diagnostics;
 using System.Windows.Forms;
+using Netch.Utils;
 
 namespace Netch.Forms
 {
@@ -13,14 +14,7 @@ namespace Netch.Forms
 
         private void AboutForm_Load(object sender, EventArgs e)
         {
-            Text = Utils.i18N.Translate(Text);
-            ChannelLabel.Text = Utils.i18N.Translate(ChannelLabel.Text);
-            SponsorGroupBox.Text = Utils.i18N.Translate(SponsorGroupBox.Text);
-        }
-
-        private void AboutForm_FormClosing(object sender, FormClosingEventArgs e)
-        {
-            Global.MainForm.Show();
+            i18N.TranslateForm(this);
         }
 
         private void NetchPictureBox_Click(object sender, EventArgs e)

@@ -1,4 +1,7 @@
 ﻿using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using Netch.Utils;
 
 namespace Netch.Models
 {
@@ -10,18 +13,23 @@ namespace Netch.Models
         public string Remark;
 
         /// <summary>
+        ///     文件相对路径(必须是存在的文件)
+        /// </summary>
+        public string RelativePath;
+
+        /// <summary>
         ///		无后缀文件名
         /// </summary>
         public string FileName;
 
         /// <summary>
-        ///     类型
-        ///     0. 进程加速
-        ///     1. TUN/TAP 规则内 IP CIDR 加速
-        ///     2. TUN/TAP 全局，绕过规则内 IP CIDR
-        ///     3. HTTP 代理（自动设置到系统代理）
-        ///     4. Socks5 代理（不自动设置到系统代理）
-        ///     5. Socks5 + HTTP 代理（不自动设置到系统代理）
+        ///     类型<para />
+        ///     0. Socks5 + 进程加速<para />
+        ///     1. Socks5 + TUN/TAP 规则内 IP CIDR 加速<para />
+        ///     2. Socks5 + TUN/TAP 全局，绕过规则内 IP CIDR<para />
+        ///     3. Socks5 + HTTP 代理（设置到系统代理）<para />
+        ///     4. Socks5 代理（不设置到系统代理）<para />
+        ///     5. Socks5 + HTTP 代理（不设置到系统代理）<para />
         /// </summary>
         public int Type = 0;
 
@@ -33,7 +41,66 @@ namespace Netch.Models
         /// <summary>
         ///		规则
         /// </summary>
-        public List<string> Rule = new List<string>();
+        public readonly List<string> Rule = new List<string>();
+
+        public List<string> FullRule
+        {
+            get
+            {
+                var result = new List<string>();
+                foreach (var s in Rule)
+                {
+                    if (string.IsNullOrWhiteSpace(s))
+                        continue;
+                    if (s.StartsWith("//"))
+                        continue;
+
+                    if (s.StartsWith("#include"))
+                    {
+                        var relativePath = new StringBuilder(s.Substring(8).Trim());
+                        relativePath.Replace("<", "");
+                        relativePath.Replace(">", "");
+                        relativePath.Replace(".h", ".txt");
+
+                        var mode = Global.Modes.FirstOrDefault(m => m.RelativePath.Equals(relativePath.ToString()));
+
+                        if (mode == null)
+                        {
+                            Logging.Warning($"{relativePath} file included in {Remark} not found");
+                        }
+                        else if (mode == this)
+                        {
+                            Logging.Warning("Can't self-reference");
+                        }
+                        else
+                        {
+                            if (mode.Type != Type)
+                            {
+                                Logging.Warning($"{mode.Remark}'s mode is not as same as {Remark}'s mode");
+                            }
+                            else
+                            {
+                                if (mode.Rule.Any(rule => rule.StartsWith("#include")))
+                                {
+                                    Logging.Warning("Cannot reference mode that reference other mode");
+                                }
+                                else
+                                {
+                                    result.AddRange(mode.FullRule);
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        result.Add(s);
+                    }
+                }
+
+                return result;
+            }
+        }
+
 
         /// <summary>
         ///		获取备注
@@ -41,7 +108,7 @@ namespace Netch.Models
         /// <returns>备注</returns>
         public override string ToString()
         {
-            return string.Format("[{0}] {1}", Type + 1, Remark);
+            return $"[{Type + 1}] {i18N.Translate(Remark)}";
         }
 
         /// <summary>
@@ -50,85 +117,15 @@ namespace Netch.Models
         /// <returns>模式文件字符串</returns>
         public string ToFileString()
         {
-            string FileString;
-
-            // 进程模式
-            if (Type == 0)
-            {
-                FileString = $"# {Remark}\r\n";
-            }
-
-            // TUN/TAP 规则内 IP CIDR，无 Bypass China 设置
-            else if (Type == 1)
-            {
-                FileString = $"# {Remark}, {Type}, 0\r\n";
-            }
-
-            // TUN/TAP 全局，绕过规则内 IP CIDR
-            // HTTP 代理（自动设置到系统代理）
-            // Socks5 代理（不自动设置到系统代理）
-            // Socks5 + HTTP 代理（不自动设置到系统代理）
-            else
-            {
-                FileString = $"# {Remark}, {Type}, {(BypassChina ? 1 : 0)}\r\n";
-            }
-
-            foreach (var item in Rule)
-            {
-                FileString = $"{FileString}{item}\r\n";
-            }
-
-            // 去除最后两个多余回车符和换行符
-            FileString = FileString.Substring(0, FileString.Length - 2);
-
-            return FileString;
+            return $"# {Remark}, {Type}, {(BypassChina ? 1 : 0)}{Global.EOF}{string.Join(Global.EOF, Rule)}";
         }
+    }
+    public static class ModeExtension
+    {
+        ///     是否会转发 UDP
+        public static bool TestNatRequired(this Mode mode) => mode.Type is 0 or 1 or 2;
 
-        /// <summary>
-        ///		写入模式文件
-        /// </summary>
-        public void ToFile(string Dir)
-        {
-            if (!System.IO.Directory.Exists(Dir))
-            {
-                System.IO.Directory.CreateDirectory(Dir);
-            }
-
-            var NewPath = System.IO.Path.Combine(Dir, FileName);
-            if (System.IO.File.Exists(NewPath + ".txt"))
-            {
-                // 重命名该模式文件名
-                NewPath += "_";
-
-                while (System.IO.File.Exists(NewPath + ".txt"))
-                {
-                    // 循环重命名该模式文件名，直至不重名
-                    NewPath += "_";
-                }
-            }
-
-            FileName = System.IO.Path.GetFileName(NewPath);
-
-            // 加上文件名后缀
-            NewPath += ".txt";
-
-            // 写入到模式文件里
-            System.IO.File.WriteAllText(NewPath, ToFileString());
-        }
-
-        /// <summary>
-        ///		删除模式文件
-        /// </summary>
-        public void DeleteFile(string Dir)
-        {
-            if (System.IO.Directory.Exists(Dir))
-            {
-                var NewPath = System.IO.Path.Combine(Dir, FileName);
-                if (System.IO.File.Exists(NewPath + ".txt"))
-                {
-                    System.IO.File.Delete(NewPath + ".txt");
-                }
-            }
-        }
+        ///     Socks5 分流是否能被有效实施
+        public static bool ClientRouting(this Mode mode) => mode.Type is not (1 or 2);
     }
 }

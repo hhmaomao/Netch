@@ -1,98 +1,105 @@
-﻿using System;
+using System;
+using System.Diagnostics;
+using System.Threading.Tasks;
+using System.Windows.Forms;
 using Microsoft.Win32;
+using Netch.Models;
+using Netch.Servers.Socks5;
+using Netch.Utils;
 
 namespace Netch.Controllers
 {
-    public class HTTPController
+    public class HTTPController : IModeController
     {
-        /// <summary>
-        ///     实例
-        /// </summary>
+        public const string IEProxyExceptions = "localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;192.168.*";
+
         public PrivoxyController pPrivoxyController = new PrivoxyController();
 
+        private string prevBypass, prevHTTP, prevPAC;
+        private bool prevEnabled;
+
+        public string Name { get; } = "HTTP";
+
         /// <summary>
-        ///		启动
+        ///     启动
         /// </summary>
-        /// <param name="server">服务器</param>
         /// <param name="mode">模式</param>
         /// <returns>是否启动成功</returns>
-        public bool Start(Models.Server server, Models.Mode mode)
+        public bool Start(in Mode mode)
         {
+            RecordPrevious();
+
             try
             {
-                if (server.Type == "Socks5")
+                if (pPrivoxyController.Start(MainController.Server, mode))
                 {
-                    if (!string.IsNullOrWhiteSpace(server.Username) && !string.IsNullOrWhiteSpace(server.Password))
-                    {
-                        return false;
-                    }
-
-                    pPrivoxyController.Start(server, mode);
-                }
-                else
-                {
-                    pPrivoxyController.Start(server, mode);
+                    Global.Job.AddProcess(pPrivoxyController.Instance);
                 }
 
-                if (mode.Type != 5)
-                {
-                    NativeMethods.SetGlobal($"127.0.0.1:{Global.Settings.HTTPLocalPort}", "<local>");
-
-                    // HTTP 系统代理模式，启动系统代理
-                    /*
-                    using (var registry = Registry.CurrentUser.OpenSubKey("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings", true))
-                    {
-                        registry.SetValue("ProxyEnable", 1);
-                        registry.SetValue("ProxyServer", $"127.0.0.1:{Global.Settings.HTTPLocalPort}");
-
-                        Win32Native.InternetSetOption(IntPtr.Zero, 39, IntPtr.Zero, 0);
-                        Win32Native.InternetSetOption(IntPtr.Zero, 37, IntPtr.Zero, 0);
-                    }
-                    */
-                }
+                if (mode.Type == 3) NativeMethods.SetGlobal($"127.0.0.1:{Global.Settings.HTTPLocalPort}", IEProxyExceptions);
             }
             catch (Exception e)
             {
-                Utils.Logging.Info(e.ToString());
+                if (MessageBoxX.Show(i18N.Translate("Failed to set the system proxy, it may be caused by the lack of dependent programs. Do you want to jump to Netch's official website to download dependent programs?"), confirm: true) == DialogResult.OK) Process.Start("https://netch.org/#/?id=%e4%be%9d%e8%b5%96");
+
+                Logging.Error("设置系统代理失败" + e);
                 return false;
             }
 
             return true;
         }
 
-        /// <summary>
-        ///		停止
-        /// </summary>
-        public void Stop()
+        private void RecordPrevious()
         {
             try
             {
-                try
+                var registry = Registry.CurrentUser.OpenSubKey("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings");
+                if (registry == null)
+                    throw new Exception();
+
+                prevPAC = registry.GetValue("AutoConfigURL")?.ToString() ?? "";
+                prevHTTP = registry.GetValue("ProxyServer")?.ToString() ?? "";
+                prevBypass = registry.GetValue("ProxyOverride")?.ToString() ?? "";
+                prevEnabled = registry.GetValue("ProxyEnable")?.Equals(1) ?? false; // HTTP Proxy Enabled
+
+                if (prevHTTP == $"127.0.0.1:{Global.Settings.HTTPLocalPort}")
                 {
-                    pPrivoxyController.Stop();
-                }
-                catch (Exception e)
-                {
-                    Utils.Logging.Info(e.ToString());
+                    prevEnabled = false;
+                    prevHTTP = "";
                 }
 
-                NativeMethods.SetDIRECT();
-
-                /*
-                using (var registry = Registry.CurrentUser.OpenSubKey("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings", true))
-                {
-                    registry.SetValue("ProxyEnable", 0);
-                    registry.DeleteValue("ProxyServer", false);
-
-                    Win32Native.InternetSetOption(IntPtr.Zero, 39, IntPtr.Zero, 0);
-                    Win32Native.InternetSetOption(IntPtr.Zero, 37, IntPtr.Zero, 0);
-                }
-                */
+                if (prevPAC != "")
+                    prevEnabled = true;
             }
-            catch (Exception e)
+            catch
             {
-                Utils.Logging.Info(e.ToString());
+                prevEnabled = false;
+                prevPAC = prevHTTP = prevBypass = "";
             }
+        }
+
+        /// <summary>
+        ///     停止
+        /// </summary>
+        public void Stop()
+        {
+            var tasks = new[]
+            {
+                Task.Factory.StartNew(pPrivoxyController.Stop),
+                Task.Factory.StartNew(() =>
+                {
+                    if (prevEnabled)
+                    {
+                        if (prevHTTP != "")
+                            NativeMethods.SetGlobal(prevHTTP, prevBypass);
+                        if (prevPAC != "")
+                            NativeMethods.SetURL(prevPAC);
+                    }
+                    else
+                        NativeMethods.SetDIRECT();
+                })
+            };
+            Task.WaitAll(tasks);
         }
     }
 }

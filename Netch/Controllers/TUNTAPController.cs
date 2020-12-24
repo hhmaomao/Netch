@@ -1,392 +1,393 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
-using System.IO;
+using System.Linq;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Text;
 using System.Threading;
-using Netch.Forms;
+using System.Threading.Tasks;
+using Netch.Models;
+using Netch.Servers.Socks5;
 using Netch.Utils;
 
 namespace Netch.Controllers
 {
-    public class TUNTAPController
+    public class TUNTAPController : Guard, IModeController
     {
+        
         /// <summary>
-        ///		进程实例（tun2socks）
+        ///     服务器 IP 地址
         /// </summary>
-        public Process Instance;
+        private IPAddress _serverAddresses;
 
         /// <summary>
-        ///		当前状态
+        ///     本地 DNS 服务控制器
         /// </summary>
-        public Models.State State = Models.State.Waiting;
+        public DNSController DNSController = new DNSController();
 
-        /// <summary>
-        ///		服务器 IP 地址
-        /// </summary>
-        public IPAddress[] ServerAddresses = new IPAddress[0];
-
-        /// <summary>
-        ///     保存传入的规则
-        /// </summary>
-        public Models.Server SavedServer = new Models.Server();
-        public Models.Mode SavedMode = new Models.Mode();
-
-        /// <summary>
-        ///		本地 DNS 服务控制器
-        /// </summary>
-        public DNSController pDNSController = new DNSController();
-
-        /// <summary>
-        ///     配置 TUNTAP 适配器
-        /// </summary>
-        public bool Configure()
+        public TUNTAPController()
         {
+            StartedKeywords.Add("Running");
+            StoppedKeywords.AddRange(new[] {"failed", "invalid vconfig file"});
+        }
+
+        public override string Name { get; protected set; } = "tun2socks";
+        public override string MainFile { get; protected set; } = "tun2socks.exe";
+
+        public bool Start(in Mode mode)
+        {
+            var server = MainController.Server;
             // 查询服务器 IP 地址
-            var destination = Dns.GetHostAddressesAsync(SavedServer.Hostname);
-            if (destination.Wait(1000))
+            _serverAddresses = DNS.Lookup(server.Hostname);
+
+            // 查找出口适配器
+            if (!Utils.Utils.SearchOutboundAdapter())
             {
-                if (destination.Result.Length == 0)
+                return false;
+            }
+
+            // 查找并安装 TAP 适配器
+            if (!SearchTapAdapter())
+            {
+                if (!AddTap())
+                {
+                    Logging.Error("Tap 适配器安装失败");
+                    return false;
+                }
+
+                SearchTapAdapter();
+            }
+
+
+            SetupRouteTable(mode);
+
+            Global.MainForm.StatusText(i18N.TranslateFormat("Starting {0}", Name));
+
+            string dns;
+            if (Global.Settings.TUNTAP.UseCustomDNS)
+            {
+                if (Global.Settings.TUNTAP.DNS.Any())
+                {
+                    dns = DNS.Join(Global.Settings.TUNTAP.DNS);
+                }
+                else
+                {
+                    Global.Settings.TUNTAP.DNS.Add("1.1.1.1");
+                    dns = "1.1.1.1";
+                }
+            }
+            else
+            {
+                try
+                {
+                    MainController.PortCheckAndShowMessageBox(53, "DNS");
+                }
+                catch
                 {
                     return false;
                 }
 
-                ServerAddresses = destination.Result;
+                if (!DNSController.Start())
+                {
+                    Logging.Error("AioDNS 启动失败");
+                    return false;
+                }
+
+                dns = "127.0.0.1";
             }
 
-            // 搜索出口
-            return Utils.Configuration.SearchOutbounds();
+            var argument = new StringBuilder();
+            if (server is Socks5 socks5 && !socks5.Auth())
+                argument.Append($"-proxyServer {server.AutoResolveHostname()}:{server.Port} ");
+            else
+                argument.Append($"-proxyServer 127.0.0.1:{Global.Settings.Socks5LocalPort} ");
+
+            argument.Append(
+                $"-tunAddr {Global.Settings.TUNTAP.Address} -tunMask {Global.Settings.TUNTAP.Netmask} -tunGw {Global.Settings.TUNTAP.Gateway} -tunDns {dns} -tunName \"{TUNTAP.GetName(Global.TUNTAP.ComponentID)}\" ");
+
+            if (Global.Settings.TUNTAP.UseFakeDNS && Global.Flags.SupportFakeDns)
+                argument.Append("-fakeDns ");
+
+            return StartInstanceAuto(argument.ToString(), ProcessPriorityClass.RealTime);
         }
+
+        /// <summary>
+        ///     TUN/TAP停止
+        /// </summary>
+        public override void Stop()
+        {
+            var tasks = new[]
+            {
+                Task.Factory.StartNew(StopInstance),
+                Task.Factory.StartNew(ClearRouteTable),
+                Task.Factory.StartNew(DNSController.Stop)
+            };
+            Task.WaitAll(tasks);
+        }
+
+        private readonly List<string> _directIPs = new List<string>();
+
+        private readonly List<string> _proxyIPs = new List<string>();
 
         /// <summary>
         ///     设置绕行规则
         /// </summary>
-        public bool SetupBypass()
+        /// <returns>是否设置成功</returns>
+        private void SetupRouteTable(Mode mode)
         {
-            MainForm.Instance.StatusText($"{Utils.i18N.Translate("Status")}{Utils.i18N.Translate(": ")}{Utils.i18N.Translate("SetupBypass")}");
-            // 让服务器 IP 走直连
-            foreach (var address in ServerAddresses)
+            Global.MainForm.StatusText(i18N.Translate("SetupBypass"));
+            Logging.Info("设置路由规则");
+
+            #region Rule IPs
+
+            switch (mode.Type)
             {
-                if (!IPAddress.IsLoopback(address))
-                {
-                    NativeMethods.CreateRoute(address.ToString(), 32, Global.Adapter.Gateway.ToString(), Global.Adapter.Index);
-                }
-            }
+                case 1:
+                    // 代理规则
+                    Logging.Info("代理 → 规则 IP");
+                    RouteAction(Action.Create, mode.FullRule, RouteType.TUNTAP);
 
-            // 处理模式的绕过中国
-            if (SavedMode.BypassChina)
-            {
-                using (var sr = new StringReader(Encoding.UTF8.GetString(Properties.Resources.CNIP)))
-                {
-                    string text;
-
-                    while ((text = sr.ReadLine()) != null)
+                    //处理 NAT 类型检测，由于协议的原因，无法仅通过域名确定需要代理的 IP，自己记录解析了返回的 IP，仅支持默认检测服务器
+                    if (Global.Settings.STUN_Server == "stun.stunprotocol.org")
                     {
-                        var info = text.Split('/');
-
-                        NativeMethods.CreateRoute(info[0], int.Parse(info[1]), Global.Adapter.Gateway.ToString(), Global.Adapter.Index);
-                    }
-                }
-            }
-
-            // 处理全局绕过 IP
-            foreach (var ip in Global.Settings.BypassIPs)
-            {
-                var info = ip.Split('/');
-                var address = IPAddress.Parse(info[0]);
-
-                if (!IPAddress.IsLoopback(address))
-                {
-                    NativeMethods.CreateRoute(address.ToString(), int.Parse(info[1]), Global.Adapter.Gateway.ToString(), Global.Adapter.Index);
-                }
-            }
-
-            if (SavedMode.Type == 2) // 处理仅规则内走直连
-            {
-                // 将 TUN/TAP 网卡权重放到最高
-                var instance = new Process
-                {
-                    StartInfo =
-                    {
-                        FileName = "netsh",
-                        Arguments = string.Format("interface ip set interface {0} metric=0", Global.TUNTAP.Index),
-                        WindowStyle = ProcessWindowStyle.Hidden,
-                        UseShellExecute = true,
-                        CreateNoWindow = true
-                    }
-                };
-                instance.Start();
-
-                // 创建默认路由
-                if (!NativeMethods.CreateRoute("0.0.0.0", 0, Global.Settings.TUNTAP.Gateway, Global.TUNTAP.Index, 10))
-                {
-                    State = Models.State.Stopped;
-
-                    foreach (var address in ServerAddresses)
-                    {
-                        NativeMethods.DeleteRoute(address.ToString(), 32, Global.Adapter.Gateway.ToString(), Global.Adapter.Index);
-                    }
-
-                    return false;
-                }
-
-                foreach (var ip in SavedMode.Rule)
-                {
-                    var info = ip.Split('/');
-
-                    if (info.Length == 2)
-                    {
-                        if (int.TryParse(info[1], out var prefix))
+                        try
                         {
-                            NativeMethods.CreateRoute(info[0], prefix, Global.Adapter.Gateway.ToString(), Global.Adapter.Index);
+                            Logging.Info("代理 → STUN 服务器 IP");
+                            RouteAction(Action.Create,
+                                new[]
+                                {
+                                    Dns.GetHostAddresses(Global.Settings.STUN_Server)[0],
+                                    Dns.GetHostAddresses("stunresponse.coldthunder11.com")[0]
+                                }.Select(ip => $"{ip}/32"),
+                                RouteType.TUNTAP);
+                        }
+                        catch
+                        {
+                            Logging.Info("NAT 类型测试域名解析失败，将不会被添加到代理列表");
                         }
                     }
-                }
-            }
-            else if (SavedMode.Type == 1) // 处理仅规则内走代理
-            {
-                foreach (var ip in SavedMode.Rule)
-                {
-                    var info = ip.Split('/');
 
-                    if (info.Length == 2)
+                    if (Global.Settings.TUNTAP.ProxyDNS)
                     {
-                        if (int.TryParse(info[1], out var prefix))
+                        Logging.Info("代理 → 自定义 DNS");
+                        if (Global.Settings.TUNTAP.UseCustomDNS)
                         {
-                            NativeMethods.CreateRoute(info[0], prefix, Global.Settings.TUNTAP.Gateway, Global.TUNTAP.Index);
+                            RouteAction(Action.Create,
+                                Global.Settings.TUNTAP.DNS.Select(ip => $"{ip}/32"),
+                                RouteType.TUNTAP);
+                        }
+                        else
+                        {
+                            RouteAction(Action.Create,
+                                new[] {"1.1.1.1", "8.8.8.8", "9.9.9.9", "185.222.222.222"}.Select(ip => $"{ip}/32"),
+                                RouteType.TUNTAP);
                         }
                     }
-                }
+
+                    break;
+                case 2:
+                    // 绕过规则
+
+                    // 将 TUN/TAP 网卡权重放到最高
+                    Process.Start(new ProcessStartInfo
+                        {
+                            FileName = "netsh",
+                            Arguments = $"interface ip set interface {Global.TUNTAP.Index} metric=0",
+                            WindowStyle = ProcessWindowStyle.Hidden,
+                            UseShellExecute = true,
+                            CreateNoWindow = true
+                        }
+                    );
+
+                    Logging.Info("绕行 → 规则 IP");
+                    RouteAction(Action.Create, mode.FullRule, RouteType.Outbound);
+                    break;
             }
-            return true;
+
+            #endregion
+
+            Logging.Info("绕行 → 服务器 IP");
+            if (!IPAddress.IsLoopback(_serverAddresses))
+                RouteAction(Action.Create, $"{_serverAddresses}/32", RouteType.Outbound);
+
+            Logging.Info("绕行 → 全局绕过 IP");
+            RouteAction(Action.Create, Global.Settings.BypassIPs, RouteType.Outbound);
+
+            if (mode.Type == 2)
+            {
+                // 绕过规则
+                Logging.Info("代理 → 全局");
+                RouteAction(Action.Create, "0.0.0.0/0", RouteType.TUNTAP);
+            }
         }
 
 
         /// <summary>
         ///     清除绕行规则
         /// </summary>
-        public bool ClearBypass()
+        private bool ClearRouteTable()
         {
-            if (SavedMode.Type == 2)
-            {
-                NativeMethods.DeleteRoute("0.0.0.0", 0, Global.Settings.TUNTAP.Gateway, Global.TUNTAP.Index, 10);
-
-                foreach (var ip in SavedMode.Rule)
-                {
-                    var info = ip.Split('/');
-
-                    if (info.Length == 2)
-                    {
-                        if (int.TryParse(info[1], out var prefix))
-                        {
-                            NativeMethods.DeleteRoute(info[0], prefix, Global.Adapter.Gateway.ToString(), Global.Adapter.Index);
-                        }
-                    }
-                }
-            }
-            else if (SavedMode.Type == 1)
-            {
-                foreach (var ip in SavedMode.Rule)
-                {
-                    var info = ip.Split('/');
-
-                    if (info.Length == 2)
-                    {
-                        if (int.TryParse(info[1], out var prefix))
-                        {
-                            NativeMethods.DeleteRoute(info[0], prefix, Global.Settings.TUNTAP.Gateway, Global.TUNTAP.Index);
-                        }
-                    }
-                }
-            }
-
-            foreach (var ip in Global.Settings.BypassIPs)
-            {
-                var info = ip.Split('/');
-                var address = IPAddress.Parse(info[0]);
-
-                if (!IPAddress.IsLoopback(address))
-                {
-                    NativeMethods.DeleteRoute(address.ToString(), int.Parse(info[1]), Global.Adapter.Gateway.ToString(), Global.Adapter.Index);
-                }
-            }
-
-            if (SavedMode.BypassChina)
-            {
-                using (var sr = new StringReader(Encoding.UTF8.GetString(Properties.Resources.CNIP)))
-                {
-                    string text;
-
-                    while ((text = sr.ReadLine()) != null)
-                    {
-                        var info = text.Split('/');
-
-                        NativeMethods.DeleteRoute(info[0], int.Parse(info[1]), Global.Adapter.Gateway.ToString(), Global.Adapter.Index);
-                    }
-                }
-            }
-
-            foreach (var address in ServerAddresses)
-            {
-                if (!IPAddress.IsLoopback(address))
-                {
-                    NativeMethods.DeleteRoute(address.ToString(), 32, Global.Adapter.Gateway.ToString(), Global.Adapter.Index);
-                }
-            }
+            RouteAction(Action.Delete, _directIPs, RouteType.Outbound);
+            RouteAction(Action.Delete, _proxyIPs, RouteType.TUNTAP);
+            _directIPs.Clear();
+            _proxyIPs.Clear();
             return true;
         }
 
-        /// <summary>
-        ///		启动
-        /// </summary>
-        /// <param name="server">配置</param>
-        /// <returns>是否成功</returns>
-        public bool Start(Models.Server server, Models.Mode mode)
-        {
-            MainForm.Instance.StatusText($"{Utils.i18N.Translate("Status")}{Utils.i18N.Translate(": ")}{Utils.i18N.Translate("Starting Tap")}");
-            foreach (var proc in Process.GetProcessesByName("tun2socks"))
-            {
-                try
-                {
-                    proc.Kill();
-                }
-                catch (Exception)
-                {
-                    // 跳过
-                }
-            }
 
-            if (!File.Exists("bin\\tun2socks.exe"))
-            {
-                return false;
-            }
-
-            if (File.Exists("logging\\tun2socks.log"))
-            {
-                File.Delete("logging\\tun2socks.log");
-            }
-
-            SavedMode = mode;
-            SavedServer = server;
-
-            if (!Configure())
-            {
-                return false;
-            }
-
-            Logging.Info("设置绕行规则");
-            SetupBypass();
-            Logging.Info("设置绕行规则完毕");
-
-            Instance = new Process();
-            Instance.StartInfo.WorkingDirectory = string.Format("{0}\\bin", Directory.GetCurrentDirectory());
-            Instance.StartInfo.FileName = string.Format("{0}\\bin\\tun2socks.exe", Directory.GetCurrentDirectory());
-            var adapterName = TUNTAP.GetName(Global.TUNTAP.ComponentID);
-            Logging.Info($"tun2sock使用适配器：{adapterName}");
-
-            string dns;
-            if (Global.Settings.TUNTAP.UseCustomDNS)
-            {
-                dns = "";
-                foreach (var value in Global.Settings.TUNTAP.DNS)
-                {
-                    dns += value;
-                    dns += ',';
-                }
-
-                dns = dns.Trim();
-                dns = dns.Substring(0, dns.Length - 1);
-            }
-            else
-            {
-                pDNSController.Start();
-                dns = "127.0.0.1";
-                //dns = "1.1.1.1,1.0.0.1";
-            }
-
-            if (server.Type == "Socks5")
-            {
-                Instance.StartInfo.Arguments = string.Format("-proxyServer {0}:{1} -tunAddr {2} -tunMask {3} -tunGw {4} -tunDns {5} -tunName \"{6}\"", server.Hostname, server.Port, Global.Settings.TUNTAP.Address, Global.Settings.TUNTAP.Netmask, Global.Settings.TUNTAP.Gateway, dns, adapterName);
-            }
-            else
-            {
-                Instance.StartInfo.Arguments = string.Format("-proxyServer 127.0.0.1:{0} -tunAddr {1} -tunMask {2} -tunGw {3} -tunDns {4} -tunName \"{5}\"", Global.Settings.Socks5LocalPort, Global.Settings.TUNTAP.Address, Global.Settings.TUNTAP.Netmask, Global.Settings.TUNTAP.Gateway, dns, adapterName);
-            } 
-
-            Instance.StartInfo.CreateNoWindow = true;
-            Instance.StartInfo.RedirectStandardError = true;
-            Instance.StartInfo.RedirectStandardInput = true;
-            Instance.StartInfo.RedirectStandardOutput = true;
-            Instance.StartInfo.UseShellExecute = false;
-            Instance.EnableRaisingEvents = true;
-            Instance.ErrorDataReceived += OnOutputDataReceived;
-            Instance.OutputDataReceived += OnOutputDataReceived;
-
-            State = Models.State.Starting;
-            Instance.Start();
-            Instance.BeginErrorReadLine();
-            Instance.BeginOutputReadLine();
-            Instance.PriorityClass = ProcessPriorityClass.RealTime;
-
-            for (var i = 0; i < 1000; i++)
-            {
-                Thread.Sleep(10);
-
-                if (State == Models.State.Started)
-                {
-                    return true;
-                }
-
-                if (State == Models.State.Stopped)
-                {
-                    Stop();
-                    return false;
-                }
-            }
-
-            return false;
-        }
-
-        /// <summary>
-        ///		停止
-        /// </summary>
-        public void Stop()
+        public bool TestFakeDNS()
         {
             try
             {
-                if (Instance != null && !Instance.HasExited)
-                {
-                    Instance.Kill();
-                }
-
-                //pDNSController.Stop();
-                //修复点击停止按钮后再启动，DNS服务没监听的BUG
-                ClearBypass();
+                InitInstance("-h");
+                Instance.Start();
+                return Instance.StandardError.ReadToEnd().Contains("-fakeDns");
             }
-            catch (Exception e)
+            catch
             {
-                Utils.Logging.Info(e.ToString());
+                return false;
             }
         }
 
-        public void OnOutputDataReceived(object sender, DataReceivedEventArgs e)
+        /// <summary>
+        ///     搜索出口和TUNTAP适配器
+        /// </summary>
+        public static bool SearchTapAdapter()
         {
-            if (!string.IsNullOrEmpty(e.Data))
-            {
-                File.AppendAllText("logging\\tun2socks.log", string.Format("{0}\r\n", e.Data.Trim()));
+            Global.TUNTAP.Adapter = null;
+            Global.TUNTAP.Index = -1;
+            Global.TUNTAP.ComponentID = TUNTAP.GetComponentID();
 
-                if (State == Models.State.Starting)
-                {
-                    if (e.Data.Contains("Running"))
-                    {
-                        State = Models.State.Started;
-                    }
-                    else if (e.Data.Contains("failed") || e.Data.Contains("invalid vconfig file"))
-                    {
-                        State = Models.State.Stopped;
-                    }
-                }
+            // 搜索 TUN/TAP 适配器的索引
+            if (string.IsNullOrEmpty(Global.TUNTAP.ComponentID))
+            {
+                Logging.Info("TAP 适配器未安装");
+                return false;
             }
+
+            // 根据 ComponentID 寻找 Tap适配器
+            try
+            {
+                var adapter = NetworkInterface.GetAllNetworkInterfaces().First(_ => _.Id == Global.TUNTAP.ComponentID);
+                Global.TUNTAP.Adapter = adapter;
+                Global.TUNTAP.Index = adapter.GetIPProperties().GetIPv4Properties().Index;
+                Logging.Info(
+                    $"TAP 适配器：{adapter.Name} {adapter.Id} {adapter.Description}, index: {Global.TUNTAP.Index}");
+                return true;
+            }
+            catch (Exception e)
+            {
+                var msg = e switch
+                {
+                    InvalidOperationException _ => $"找不到标识符为 {Global.TUNTAP.ComponentID} 的 TAP 适配器: {e.Message}",
+                    NetworkInformationException _ => $"获取 Tap 适配器信息错误: {e.Message}",
+                    _ => $"Tap 适配器其他异常: {e}"
+                };
+                Logging.Error(msg);
+                return false;
+            }
+        }
+
+        private static bool AddTap()
+        {
+            TUNTAP.addtap();
+            // 给点时间，不然立马安装完毕就查找适配器可能会导致找不到适配器ID
+            Thread.Sleep(1000);
+            if (string.IsNullOrEmpty(Global.TUNTAP.ComponentID = TUNTAP.GetComponentID()))
+            {
+                Logging.Error("找不到 TAP 适配器，驱动可能安装失败");
+                return false;
+            }
+
+            return true;
+        }
+
+
+        private enum RouteType
+        {
+            Outbound,
+            TUNTAP
+        }
+
+        private enum Action
+        {
+            Create,
+            Delete
+        }
+
+        private void RouteAction(Action action, in IEnumerable<string> ipNetworks, RouteType routeType,
+            int metric = 0)
+        {
+            foreach (var address in ipNetworks)
+            {
+                RouteAction(action, address, routeType, metric);
+            }
+        }
+
+        private bool RouteAction(Action action, in string ipNetwork, RouteType routeType, int metric = 0)
+        {
+            string gateway;
+            int index;
+            switch (routeType)
+            {
+                case RouteType.Outbound:
+                    gateway = Global.Outbound.Gateway.ToString();
+                    index = Global.Outbound.Index;
+                    break;
+                case RouteType.TUNTAP:
+                    gateway = Global.Settings.TUNTAP.Gateway;
+                    index = Global.TUNTAP.Index;
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(routeType), routeType, null);
+            }
+
+            string network;
+            ushort cidr;
+            try
+            {
+                var s = ipNetwork.Split('/');
+                network = s[0];
+                cidr = ushort.Parse(s[1]);
+            }
+            catch
+            {
+                Logging.Warning($"Failed to parse rule {ipNetwork}");
+                return false;
+            }
+
+            bool result;
+            switch (action)
+            {
+                case Action.Create:
+                {
+                    result = NativeMethods.CreateRoute(network, cidr, gateway, index, metric);
+                    switch (routeType)
+                    {
+                        case RouteType.Outbound:
+                            _directIPs.Add(ipNetwork);
+                            break;
+                        case RouteType.TUNTAP:
+                            _proxyIPs.Add(ipNetwork);
+                            break;
+                    }
+
+                    break;
+                }
+                case Action.Delete:
+                    result = NativeMethods.DeleteRoute(network, cidr, gateway, index, metric);
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(action), action, null);
+            }
+
+            if (!result)
+            {
+                Logging.Warning($"Failed to {action} Route on {routeType} Adapter: {ipNetwork} metric {metric}");
+            }
+
+            return result;
         }
     }
 }

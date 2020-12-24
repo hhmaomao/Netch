@@ -1,84 +1,45 @@
-﻿using System;
-using System.Diagnostics;
-using System.IO;
+﻿using System.IO;
+using System.Text;
+using Netch.Models;
+using Netch.Servers.Socks5;
 
 namespace Netch.Controllers
 {
-    public class PrivoxyController
+    public class PrivoxyController : Guard, IController
     {
-        /// <summary>
-        ///     进程实例
-        /// </summary>
-        public Process Instance;
-
-        /// <summary>
-        ///		启动
-        /// </summary>
-        /// <param name="server">服务器</param>
-        /// <param name="mode">模式</param>
-        /// <returns>是否启动成功</returns>
-        public bool Start(Models.Server server, Models.Mode mode)
+        public PrivoxyController()
         {
-            foreach (var proc in Process.GetProcessesByName("Privoxy"))
-            {
-                try
-                {
-                    proc.Kill();
-                }
-                catch (Exception)
-                {
-                    // 跳过
-                }
-            }
-
-            if (!File.Exists("bin\\Privoxy.exe") || !File.Exists("bin\\default.conf"))
-            {
-                return false;
-            }
-
-            if (server.Type != "Socks5")
-            {
-                File.WriteAllText("data\\privoxy.conf", File.ReadAllText("bin\\default.conf").Replace("_BIND_PORT_", Global.Settings.HTTPLocalPort.ToString()).Replace("_DEST_PORT_", Global.Settings.Socks5LocalPort.ToString()).Replace("0.0.0.0", Global.Settings.LocalAddress));
-            }
-            else
-            {
-                File.WriteAllText("data\\privoxy.conf", File.ReadAllText("bin\\default.conf").Replace("_BIND_PORT_", Global.Settings.HTTPLocalPort.ToString()).Replace("_DEST_PORT_", server.Port.ToString()).Replace("s 0.0.0.0", $"s {Global.Settings.LocalAddress}").Replace("/ 127.0.0.1", $"/ {server.Hostname}"));
-            }
-
-
-            Instance = new Process
-            {
-                StartInfo =
-                {
-                    FileName = string.Format("{0}\\bin\\Privoxy.exe", Directory.GetCurrentDirectory()),
-                    Arguments = "..\\data\\privoxy.conf",
-                    WorkingDirectory = string.Format("{0}\\bin", Directory.GetCurrentDirectory()),
-                    WindowStyle = ProcessWindowStyle.Hidden,
-                    UseShellExecute = true,
-                    CreateNoWindow = true
-                }
-            };
-            Instance.Start();
-
-            return true;
+            RedirectStd = false;
         }
 
-        /// <summary>
-        ///		停止
-        /// </summary>
-        public void Stop()
+        public override string Name { get; protected set; } = "Privoxy";
+
+        public override string MainFile { get; protected set; } = "Privoxy.exe";
+
+        public bool Start(Server server, Mode mode)
         {
-            try
+            var text = new StringBuilder(File.ReadAllText("bin\\default.conf"));
+
+            text.Replace("_BIND_PORT_", Global.Settings.HTTPLocalPort.ToString());
+            text.Replace("0.0.0.0", Global.Settings.LocalAddress); /* BIND_HOST */
+
+            if (server is Socks5 socks5 && !socks5.Auth())
             {
-                if (Instance != null && !Instance.HasExited)
-                {
-                    Instance.Kill();
-                }
+                text.Replace("/ 127.0.0.1", $"/ {server.AutoResolveHostname()}"); /* DEST_HOST */
+                text.Replace("_DEST_PORT_", socks5.Port.ToString());
             }
-            catch (Exception)
-            {
-                // 跳过
-            }
+
+            text.Replace("_DEST_PORT_", Global.Settings.Socks5LocalPort.ToString());
+
+
+            File.WriteAllText("data\\privoxy.conf", text.ToString());
+
+            return StartInstanceAuto("..\\data\\privoxy.conf");
+        }
+
+        public override void Stop()
+        {
+            StopInstance();
         }
     }
 }

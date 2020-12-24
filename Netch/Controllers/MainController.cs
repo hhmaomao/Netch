@@ -1,257 +1,270 @@
-﻿using System;
-using System.Diagnostics;
+using System;
 using System.IO;
+using System.Net;
 using System.Threading.Tasks;
+using Netch.Models;
+using Netch.Servers.Socks5;
+using Netch.Utils;
+using static Netch.Forms.MainForm;
+using static Netch.Utils.PortHelper;
 
 namespace Netch.Controllers
 {
-    public class MainController
+    public static class MainController
     {
-        public static Process GetProcess()
+        public static IServerController ServerController
         {
-            var process = new Process();
-            process.StartInfo.WorkingDirectory = string.Format("{0}\\bin", Directory.GetCurrentDirectory());
-            process.StartInfo.CreateNoWindow = true;
-            process.StartInfo.RedirectStandardError = true;
-            process.StartInfo.RedirectStandardInput = true;
-            process.StartInfo.RedirectStandardOutput = true;
-            process.StartInfo.UseShellExecute = false;
-            process.EnableRaisingEvents = true;
-
-            return process;
+            get => _serverController;
+            private set => _serverController = value;
         }
 
-        /// <summary>
-        ///		SS 控制器
-        /// </summary>
-        public SSController pSSController;
+        public static IServerController UdpServerController
+        {
+            get => _udpServerController ?? _serverController;
+            set => _udpServerController = value;
+        }
+
+        /// TCP or Both Server
+        public static Server Server;
+
+        public static Server UdpServer
+        {
+            get => _udpServer ?? Server;
+            set => _udpServer = value;
+        }
+
+        private static Server _udpServer;
+        public static IModeController ModeController { get; private set; }
+
+        public static bool NttTested;
+
+        private static readonly NTTController NTTController = new NTTController();
+        private static IServerController _serverController;
+        private static IServerController _udpServerController;
 
         /// <summary>
-        ///     SSR 控制器
-        /// </summary>
-        public SSRController pSSRController;
-
-        /// <summary>
-        ///     V2Ray 控制器
-        /// </summary>
-        public VMessController pVMessController;
-
-        /// <summary>
-        ///		NF 控制器
-        /// </summary>
-        public NFController pNFController;
-
-        /// <summary>
-        ///     HTTP 控制器
-        /// </summary>
-        public HTTPController pHTTPController;
-
-
-        /// <summary>
-        ///     TUN/TAP 控制器
-        /// </summary>
-        public TUNTAPController pTUNTAPController;
-
-        /// <summary>
-        ///		NTT 控制器
-        /// </summary>
-        public NTTController pNTTController;
-
-        /// <summary>
-        ///		启动
+        ///     启动
         /// </summary>
         /// <param name="server">服务器</param>
         /// <param name="mode">模式</param>
         /// <returns>是否启动成功</returns>
-        public bool Start(Models.Server server, Models.Mode mode)
+        public static async Task<bool> Start(Server server, Mode mode)
         {
-            var result = false;
-            switch (server.Type)
+            Logging.Info($"启动主控制器: {server.Type} [{mode.Type}]{mode.Remark}");
+            Server = server;
+
+            if (server is Socks5 && mode.Type == 4)
             {
-                case "Socks5":
-                    if (mode.Type == 4)
-                    {
-                        result = false;
-                    }
-                    else
-                    {
-                        result = true;
-                    }
-                    break;
-                case "SS":
-                    KillProcess("Shadowsocks");
-                    if (pSSController == null)
-                    {
-                        pSSController = new SSController();
-                    }
-                    result = pSSController.Start(server, mode);
-                    break;
-                case "SSR":
-                    KillProcess("ShadowsocksR");
-                    if (pSSRController == null)
-                    {
-                        pSSRController = new SSRController();
-                    }
-                    result = pSSRController.Start(server, mode);
-                    break;
-                case "VMess":
-                    KillProcess("v2ray");
-                    if (pVMessController == null)
-                    {
-                        pVMessController = new VMessController();
-                    }
-                    result = pVMessController.Start(server, mode);
-                    break;
+                return false;
             }
 
-            if (result)
-            {
-                if (mode.Type == 0)
-                {
-                    if (pNFController == null)
-                    {
-                        pNFController = new NFController();
-                    }
-                    if (pNTTController == null)
-                    {
-                        pNTTController = new NTTController();
-                    }
-                    // 进程代理模式，启动 NF 控制器
-                    result = pNFController.Start(server, mode);
+            // 刷新DNS缓存
+            NativeMethods.FlushDNSResolverCache();
 
-                    Task.Run(() =>
-                    {
-                        pNTTController.Start();
-                    });
-
-                }
-                else if (mode.Type == 1)
-                {
-                    if (pTUNTAPController == null)
-                    {
-                        pTUNTAPController = new TUNTAPController();
-                    }
-                    if (pNTTController == null)
-                    {
-                        pNTTController = new NTTController();
-                    }
-                    // TUN/TAP 黑名单代理模式，启动 TUN/TAP 控制器
-                    result = pTUNTAPController.Start(server, mode);
-
-                    Task.Run(() =>
-                    {
-                        pNTTController.Start();
-                    });
-                }
-                else if (mode.Type == 2)
-                {
-                    if (pTUNTAPController == null)
-                    {
-                        pTUNTAPController = new TUNTAPController();
-                    }
-                    if (pNTTController == null)
-                    {
-                        pNTTController = new NTTController();
-                    }
-                    // TUN/TAP 白名单代理模式，启动 TUN/TAP 控制器
-                    result = pTUNTAPController.Start(server, mode);
-
-                    Task.Run(() =>
-                    {
-                        pNTTController.Start();
-                    });
-                }
-                else if (mode.Type == 3 || mode.Type == 5)
-                {
-                    if (pHTTPController == null)
-                    {
-                        pHTTPController = new HTTPController();
-                    }
-                    // HTTP 系统代理和 Socks5 和 HTTP 代理模式，启动 HTTP 控制器
-                    result = pHTTPController.Start(server, mode);
-                }
-                else if (mode.Type == 4)
-                {
-                    // Socks5 代理模式，不需要启动额外的控制器
-                }
-                else
-                {
-                    result = false;
-                }
-            }
-
-            if (!result)
-            {
-                Stop();
-            }
-
-            return result;
-        }
-
-        /// <summary>
-        ///		停止
-        /// </summary>
-        public void Stop()
-        {
-            if (pSSController != null)
-            {
-                pSSController.Stop();
-            }
-            else if (pSSRController != null)
-            {
-                pSSRController.Stop();
-            }
-            else if (pVMessController != null)
-            {
-                pVMessController.Stop();
-            }
-
-            if (pNFController != null)
-            {
-                pNFController.Stop();
-            }
-            else if (pTUNTAPController != null)
-            {
-                pTUNTAPController.Stop();
-            }
-            else if (pHTTPController != null)
-            {
-                pHTTPController.Stop();
-            }
-
-            if (pNTTController != null)
-            {
-                pNTTController.Stop();
-            }
-        }
-
-        public void KillProcess(string name)
-        {
-            var processes = Process.GetProcessesByName(name);
-            foreach (var p in processes)
-            {
-                if (IsChildProcess(p, name))
-                {
-                    p.Kill();
-                }
-            }
-        }
-
-        private static bool IsChildProcess(Process process, string name)
-        {
-            bool result;
             try
             {
-                var FileName = (Directory.GetCurrentDirectory() + "\\bin\\" + name + ".exe").ToLower();
-                var procFileName = process.MainModule.FileName.ToLower();
-                result = FileName.Equals(procFileName, StringComparison.Ordinal);
+                WebUtil.BestLocalEndPoint(new IPEndPoint(0x72727272, 53));
+            }
+            catch (Exception)
+            {
+                MessageBoxX.Show("No internet connection");
+                return false;
+            }
+
+            if (Global.Settings.ResolveServerHostname && DNS.Lookup(server.Hostname) == null)
+            {
+                MessageBoxX.Show("Lookup Server hostname failed");
+                return false;
+            }
+
+            // 添加Netch到防火墙
+            _ = Task.Run(Firewall.AddNetchFwRules);
+
+            try
+            {
+                if (!ModeHelper.SkipServerController(server, mode))
+                {
+                    if (!await Task.Run(() => StartServer(server, mode, ref _serverController)))
+                    {
+                        throw new StartFailedException();
+                    }
+
+                    StatusPortInfoText.UpdateShareLan();
+                }
+
+                if (!await StartMode(mode))
+                {
+                    throw new StartFailedException();
+                }
+
+                if (mode.TestNatRequired())
+                    NatTest();
+
+                return true;
             }
             catch (Exception e)
             {
-                Utils.Logging.Info(e.Message);
-                result = false;
+                switch (e)
+                {
+                    case DllNotFoundException _:
+                    case FileNotFoundException _:
+                        MessageBoxX.Show(e.Message + "\n\n" + i18N.Translate("Missing File or runtime components"), owner: Global.MainForm);
+                        break;
+                    case StartFailedException _:
+                    case PortInUseException _:
+                        break;
+                    default:
+                        Logging.Error($"主控制器未处理异常: {e}");
+                        break;
+                }
+
+                try
+                {
+                    await Stop();
+                }
+                catch
+                {
+                    // ignored
+                }
+
+                return false;
             }
-            return result;
         }
+
+        private static bool StartServer(Server server, Mode mode, ref IServerController controller)
+        {
+            controller = ServerHelper.GetUtilByTypeName(server.Type).GetController();
+
+            if (controller is Guard instanceController)
+            {
+                Utils.Utils.KillProcessByName(instanceController.MainFile);
+            }
+
+            PortCheckAndShowMessageBox(controller.Socks5LocalPort(), "Socks5");
+
+            Global.MainForm.StatusText(i18N.TranslateFormat("Starting {0}", controller.Name));
+            if (controller.Start(in server, mode))
+            {
+                if (controller is Guard guard)
+                {
+                    if (guard.Instance != null)
+                    {
+                        Global.Job.AddProcess(guard.Instance);
+                    }
+                }
+
+                if (server is Socks5 socks5)
+                {
+                    if (socks5.Auth())
+                        UsingPorts.Add(StatusPortInfoText.Socks5Port = controller.Socks5LocalPort());
+                }
+                else
+                {
+                    UsingPorts.Add(StatusPortInfoText.Socks5Port = controller.Socks5LocalPort());
+                }
+
+                return true;
+            }
+
+            return false;
+        }
+
+        private static async Task<bool> StartMode(Mode mode)
+        {
+            ModeController = ModeHelper.GetModeControllerByType(mode.Type, out var port, out var portName, out var portType);
+
+            if (ModeController == null)
+            {
+                return true;
+            }
+
+            if (port != null)
+            {
+                PortCheckAndShowMessageBox((ushort) port, portName, portType);
+                UsingPorts.Add((ushort) port);
+            }
+
+            Global.MainForm.StatusText(i18N.TranslateFormat("Starting {0}", ModeController.Name));
+            if (await Task.Run(() => ModeController.Start(mode)))
+            {
+                if (ModeController is Guard guard)
+                {
+                    if (guard.Instance != null)
+                    {
+                        Global.Job.AddProcess(guard.Instance);
+                    }
+                }
+
+                return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        ///     停止
+        /// </summary>
+        public static async Task Stop()
+        {
+            UsingPorts.Clear();
+            StatusPortInfoText.Reset();
+
+            _ = Task.Run(() => NTTController.Stop());
+
+            var tasks = new[]
+            {
+                Task.Run(() => ServerController?.Stop()),
+                Task.Run(() => ModeController?.Stop()),
+            };
+            await Task.WhenAll(tasks);
+            ModeController = null;
+            ServerController = null;
+        }
+
+
+        /// <summary>
+        ///     检查端口是否被占用, 
+        ///     被占用则弹窗提示, 确认后抛出异常
+        /// </summary>
+        /// <param name="port">检查的端口</param>
+        /// <param name="portName">端口用途名称</param>
+        /// <param name="portType"></param>
+        /// <exception cref="PortInUseException"></exception>
+        public static void PortCheckAndShowMessageBox(ushort port, string portName, PortType portType = PortType.Both)
+        {
+            if (PortInUse(port, portType))
+            {
+                MessageBoxX.Show(i18N.TranslateFormat("The {0} port is in use.", $"{portName} ({port})"));
+                throw new PortInUseException();
+            }
+        }
+
+        /// <summary>
+        ///     测试 NAT
+        /// </summary>
+        public static void NatTest()
+        {
+            NttTested = false;
+            Task.Run(() =>
+            {
+                Global.MainForm.NatTypeStatusText(i18N.Translate("Starting NatTester"));
+                // Thread.Sleep(1000);
+                var (result, localEnd, publicEnd) = NTTController.Start();
+
+                if (!string.IsNullOrEmpty(publicEnd))
+                {
+                    var country = Utils.Utils.GetCityCode(publicEnd);
+                    Global.MainForm.NatTypeStatusText(result, country);
+                }
+                else
+                    Global.MainForm.NatTypeStatusText(result ?? "Error");
+
+                NttTested = true;
+            });
+        }
+    }
+
+    public class StartFailedException : Exception
+    {
     }
 }

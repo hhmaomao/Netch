@@ -1,4 +1,6 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace Netch.Models
 {
@@ -31,6 +33,51 @@ namespace Netch.Models
         ///		使用自定义 DNS 设置
         /// </summary>
         public bool UseCustomDNS = false;
+
+        /// <summary>
+        ///		模式 2 下是否代理 DNS
+        /// </summary>
+        public bool ProxyDNS = false;
+
+        /// <summary>
+        ///		使用Fake DNS
+        /// </summary>
+        public bool UseFakeDNS = false;
+    }
+
+    public class KcpConfig
+    {
+        public int mtu = 1350;
+
+        public int tti = 50;
+
+        public int uplinkCapacity = 12;
+
+        public int downlinkCapacity = 100;
+
+        public bool congestion = false;
+
+        public int readBufferSize = 2;
+
+        public int writeBufferSize = 2;
+    }
+
+    public class V2rayConfig
+    {
+        public bool AllowInsecure = true;
+
+        public KcpConfig KcpConfig = new KcpConfig();
+
+        public bool UseMux = true;
+    }
+
+    public class AioDNSConfig
+    {
+        public string RulePath = "bin\\china_site_list";
+
+        public string ChinaDNS = "223.5.5.5";
+
+        public string OtherDNS = "1.1.1.1";
     }
 
     /// <summary>
@@ -79,25 +126,54 @@ namespace Netch.Models
         public bool CheckUpdateWhenOpened = true;
 
         /// <summary>
-        ///		使用何种模式文件名
-        ///		0 为自定义文件名，1 为使用和备注一致的文件名，2 为使用时间数据作为文件名
+        ///		是否检查 Beta 更新
         /// </summary>
-        public int ModeFileNameType = 1;
+        public bool CheckBetaUpdate = false;
+
+        /// <summary>
+        ///		是否打开软件时更新订阅
+        /// </summary>
+        public bool UpdateSubscribeatWhenOpened = false;
+
+        /// <summary>
+        ///     修改系统 DNS
+        /// </summary>
+        public bool ModifySystemDNS = false;
+
+        /// <summary>
+        ///     要修改为的系统 DNS
+        /// </summary>
+        public string ModifiedDNS = "1.1.1.1,8.8.8.8";
+
+        /// <summary>
+        ///     解析服务器主机名
+        /// </summary>
+        public bool ResolveServerHostname = false;
+
+        /// <summary>
+        ///     网页请求超时 毫秒
+        /// </summary>
+        public int RequestTimeout = 10000;
 
         /// <summary>
         ///		HTTP 本地端口
         /// </summary>
-        public int HTTPLocalPort = 2802;
+        public ushort HTTPLocalPort = 2802;
 
         /// <summary>
         ///		Socks5 本地端口
         /// </summary>
-        public int Socks5LocalPort = 2801;
+        public ushort Socks5LocalPort = 2801;
 
         /// <summary>
         ///		Redirector TCP 占用端口
         /// </summary>
-        public int RedirectorTCPPort = 2800;
+        public ushort RedirectorTCPPort = 3901;
+
+        /// <summary>
+        ///		UDP Socket 占用端口
+        /// </summary>
+        public ushort UDPSocketPort = 18291;
 
         /// <summary>
         ///		HTTP 和 Socks5 本地代理地址
@@ -122,7 +198,7 @@ namespace Netch.Models
         /// <summary>
         ///     服务器列表
         /// </summary>
-        public List<Server> Server = new List<Server>();
+        public readonly List<Server> Server = new List<Server>();
 
         /// <summary>
         ///		全局绕过 IP 列表
@@ -132,7 +208,7 @@ namespace Netch.Models
         /// <summary>
         ///		已保存的快捷配置
         /// </summary>
-        public List<Profile> profiles = new List<Profile>();
+        public List<Profile> Profiles = new List<Profile>();
 
         /// <summary>
         ///		快捷配置数量
@@ -142,11 +218,44 @@ namespace Netch.Models
         /// <summary>
         ///     STUN测试服务器
         /// </summary>
-        public string STUN_Server = "stun.stunprotocol.org";
+        public string STUN_Server = "stun.syncthing.net";
 
         /// <summary>
         ///     STUN测试服务器
         /// </summary>
         public int STUN_Server_Port = 3478;
+
+        /// <summary>
+        ///     是否启用启动后延迟测试
+        /// </summary>
+        public bool StartedTcping = false;
+
+        /// <summary>
+        ///     启动后延迟测试间隔/秒
+        /// </summary>
+        public int StartedTcping_Interval = 3;
+
+        /// <summary>
+        ///     ACL规则
+        /// </summary>
+        public string ACL = "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/banAD.acl";
+
+        /// <summary>
+        ///     是否使用DLL启动Shadowsocks
+        /// </summary>
+        public bool BootShadowsocksFromDLL = true;
+
+        /// <summary>
+        ///     语言设置
+        /// </summary>
+        public string Language = "System";
+
+        public V2rayConfig V2RayConfig = new V2rayConfig();
+
+        public AioDNSConfig AioDNS = new AioDNSConfig();
+
+        public bool RedirectorSS = false;
+
+        public bool ProcessNoProxyForUdp = false;
     }
 }

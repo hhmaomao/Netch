@@ -51,7 +51,7 @@
             // SponsorPictureBox
             // 
             this.SponsorPictureBox.Cursor = System.Windows.Forms.Cursors.Hand;
-            this.SponsorPictureBox.Image = global::Netch.Properties.Resources.N3RO;
+            this.SponsorPictureBox.Image = global::Netch.Properties.Resources.Sponsor;
             this.SponsorPictureBox.Location = new System.Drawing.Point(6, 22);
             this.SponsorPictureBox.Name = "SponsorPictureBox";
             this.SponsorPictureBox.Size = new System.Drawing.Size(300, 200);
@@ -99,7 +99,6 @@
             this.Name = "AboutForm";
             this.StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen;
             this.Text = "About";
-            this.FormClosing += new System.Windows.Forms.FormClosingEventHandler(this.AboutForm_FormClosing);
             this.Load += new System.EventHandler(this.AboutForm_Load);
             this.SponsorGroupBox.ResumeLayout(false);
             ((System.ComponentModel.ISupportInitialize)(this.SponsorPictureBox)).EndInit();

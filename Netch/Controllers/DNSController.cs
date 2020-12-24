@@ -1,39 +1,45 @@
-﻿using Netch.Forms;
-using System;
-using System.Net;
+﻿using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
 
 namespace Netch.Controllers
 {
-    public class DNSController
+    public class DNSController : IController
     {
-        public static DNS.Server.DnsServer Server = new DNS.Server.DnsServer(new Resolver());
 
+        public string Name { get; } = "DNS Service";
+
+        /// <summary>
+        ///     启动DNS服务
+        /// </summary>
+        /// <returns></returns>
         public bool Start()
         {
-            MainForm.Instance.StatusText($"{Utils.i18N.Translate("Status")}{Utils.i18N.Translate(": ")}{Utils.i18N.Translate("Starting LocalDns service")}");
-            try
-            {
-                _ = Server.Listen(new IPEndPoint(IPAddress.IPv6Any, 53));
-            }
-            catch (Exception e)
-            {
-                Utils.Logging.Info(e.ToString());
+            if (!aiodns_dial(Encoding.UTF8.GetBytes(Path.GetFullPath(Global.Settings.AioDNS.RulePath)),
+                Encoding.UTF8.GetBytes($"{Global.Settings.AioDNS.ChinaDNS}:53"),
+                Encoding.UTF8.GetBytes($"{Global.Settings.AioDNS.OtherDNS}:53"))
+            )
                 return false;
-            }
-
-            return true;
+            return
+                aiodns_init();
         }
 
         public void Stop()
         {
-            try
-            {
-                Server.Dispose();
-            }
-            catch (Exception e)
-            {
-                Utils.Logging.Info(e.ToString());
-            }
+            aiodns_free();
         }
+
+        #region NativeMethods
+
+        [DllImport("aiodns.bin", CallingConvention = CallingConvention.Cdecl)]
+        public static extern bool aiodns_dial(byte[] chinacon, byte[] chinadns, byte[] otherdns);
+
+        [DllImport("aiodns.bin", CallingConvention = CallingConvention.Cdecl)]
+        public static extern bool aiodns_init();
+
+        [DllImport("aiodns.bin", CallingConvention = CallingConvention.Cdecl)]
+        public static extern void aiodns_free();
+
+        #endregion
     }
 }
